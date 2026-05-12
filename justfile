@@ -61,14 +61,23 @@ init:
 # Simulation
 # ============================================================================
 
-# Run cloudship SITL (Docker) + Gazebo Classic + QGroundControl in zellij panes
+# Run cloudship SITL with Gazebo GUI + QGroundControl in zellij panes (default)
 run: init
     #!/usr/bin/env bash
     set -e
     just _launch \
         "Cloudship" \
         "PX4 (cloudship)" \
-        "$(just _docker-cmd)"
+        "$(just _docker-cmd gui)"
+
+# Run cloudship SITL headless (no Gazebo GUI) — physics runs at real-time RTF
+run-headless: init
+    #!/usr/bin/env bash
+    set -e
+    just _launch \
+        "Cloudship (headless)" \
+        "PX4 (cloudship, headless)" \
+        "$(just _docker-cmd headless)"
 
 # Close PX4 SITL container, QGroundControl, and the zellij session
 close:
@@ -109,12 +118,20 @@ clean:
 # ============================================================================
 
 # Print the docker-run command that builds + runs cloudship SITL.
-# Forwards WSLg sockets so Gazebo Classic surfaces on the Windows desktop and
-# publishes UDP 14550 (GCS) + 14556 (onboard SDK) so QGC and external tools
-# can reach the airship via localhost. All values are baked in at generation
-# time so the result can be embedded inside a zellij KDL string.
+# Forwards WSLg sockets so Gazebo Classic surfaces on the Windows desktop.
+# Uses --network=host so PX4's GCS mavlink (bound on container:18570) and
+# its 255.255.255.255:14550 heartbeat broadcasts land on the host network
+# where QGC can hear them — explicit `-p` forwards would put docker-proxy
+# on host:14550 and block QGC's autoconnect listener.
+# Uses --ipc=host so Qt's MIT-SHM ShmPutImage calls can reach the same SysV
+# shared-memory segments XWayland sees — without it the container's IPC
+# namespace hides them and Gazebo floods the console with XCB BadValue.
+# `mode` is "gui" or "headless"; headless adds HEADLESS=1 so sitl_run.sh
+# skips gzclient and physics can hit real-time RTF.
+# All values are baked in at generation time so the result can be embedded
+# inside a zellij KDL string.
 [private]
-_docker-cmd:
+_docker-cmd mode="gui":
     #!/usr/bin/env bash
     set -e
     cwd="$(pwd)"
@@ -122,8 +139,12 @@ _docker-cmd:
     mkdir -p "$ccache"
     display="${DISPLAY:-:0}"
     wayland="${WAYLAND_DISPLAY:-wayland-0}"
+    headless_env=""
+    if [ "{{mode}}" = "headless" ]; then
+        headless_env="-e HEADLESS=1"
+    fi
     cat <<EOF
-    docker run --rm -it --name {{CONTAINER}} -e DISPLAY=$display -e WAYLAND_DISPLAY=$wayland -e XDG_RUNTIME_DIR=/mnt/wslg/runtime-dir -e PULSE_SERVER=/mnt/wslg/PulseServer -e LIBGL_ALWAYS_SOFTWARE=1 -e LOCAL_USER_ID=$(id -u) -e CCACHE_DIR=$ccache -v /tmp/.X11-unix:/tmp/.X11-unix -v /mnt/wslg:/mnt/wslg -v $cwd/{{PX4_DIR}}:$cwd/{{PX4_DIR}}:rw -v $ccache:$ccache:rw -w $cwd/{{PX4_DIR}} -p 14556:14556/udp -p 14550:14550/udp {{DOCKER_IMAGE}} bash -c 'make {{PX4_TARGET}}'
+    docker run --rm -it --name {{CONTAINER}} --network=host --ipc=host -e DISPLAY=$display -e WAYLAND_DISPLAY=$wayland -e XDG_RUNTIME_DIR=/mnt/wslg/runtime-dir -e PULSE_SERVER=/mnt/wslg/PulseServer -e LIBGL_ALWAYS_SOFTWARE=1 $headless_env -e LOCAL_USER_ID=$(id -u) -e CCACHE_DIR=$ccache -v /tmp/.X11-unix:/tmp/.X11-unix -v /mnt/wslg:/mnt/wslg -v $cwd/{{PX4_DIR}}:$cwd/{{PX4_DIR}}:rw -v $ccache:$ccache:rw -w $cwd/{{PX4_DIR}} {{DOCKER_IMAGE}} bash -c 'make {{PX4_TARGET}}'
     EOF
 
 # Build the zellij 3-pane layout (PX4 / QGC / Terminal) and launch the session.
